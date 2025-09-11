@@ -49,12 +49,15 @@ BEGIN
         SELECT 
             wa.activity_id,
             wa.activity_type_id,
-            wa.activity_type,
-            CASE WHEN wa.activity_type_id = 4 AND NOT COALESCE(wa.is_lead, FALSE)
-                THEN concat(wa.title, ' ', wa.details)
-            WHEN wa.activity_type_id = 4 AND COALESCE(wa.is_lead, FALSE)
-                THEN ltrim(substring(details FROM '-(.*)'), ' ')
-            ELSE wa.details END AS details,
+            wa.activity_type,            
+			CASE 					
+	            WHEN wa.activity_type_id = 4 AND COALESCE(wa.is_lead, FALSE)
+	                THEN ltrim(substring(details FROM '-(.*)'), ' ')
+	            ELSE wa.details END AS details,
+			CASE 
+				WHEN wa.activity_type_id = 4 AND NOT COALESCE(wa.is_lead, FALSE)
+                	THEN wa.title
+				ELSE ' ' END AS title,
             CASE 
                 WHEN wa.activity_type_id IN (73, 3) THEN wa.creator_id
                 ELSE wa.assigned_to
@@ -105,9 +108,12 @@ BEGIN
             fwa.fopc_activity_id      AS activity_id,
             fwa.fopc_activity_type_id AS activity_type_id,
             fwa.fopc_activity_type    AS activity_type,
-            CASE WHEN (fwa.fopc_activity_type_id = 4) AND NOT coalesce(fwa.fopc_is_lead, FALSE)
-                THEN concat(fwa.fopc_title, ' ', fwa.fopc_details)
-            ELSE fwa.fopc_details END AS details,
+			fwa.fopc_details AS details,
+            CASE 
+				WHEN (fwa.fopc_activity_type_id = 4) AND NOT coalesce(fwa.fopc_is_lead, FALSE)
+                	THEN fwa.fopc_title
+					ELSE ' ' 
+				END AS title,            
             CASE 
             WHEN fwa.fopc_activity_type_id IN (73, 3) 
                 THEN fwa.fopc_creator_id
@@ -148,6 +154,7 @@ BEGIN
             23                       AS activity_type_id,
             'File'                   AS activity_type,
             cf.file_modifiedname     AS details,
+			NULL::TEXT 			     AS title,	
             cf.created_by            AS assigned_to,
             NULL                     AS due_on,            
             cf.created_on            AS created_on,
@@ -178,7 +185,8 @@ BEGIN
             CASE WHEN wa.activity_type_id = 15 
                 THEN 'SWAT-Projects'
             ELSE 'SWAT' END                    AS activity_type,
-            regexp_replace(wa.details, '^\d{2}\.\d{2}\.\d{2}\s*', '') AS details,
+            concat(regexp_replace(wa.details, '^\d{2}\.\d{2}\.\d{2}\s*', '')) AS details,
+			'SWAT'::TEXT 			     AS title,
             COALESCE(u.user_id, wa.creator_id) AS assigned_to,
 --            CASE 
 --            WHEN wa.activity_type_id = 15 
@@ -225,6 +233,7 @@ BEGIN
             wa.activity_type_id     AS activity_type_id,
             'Projection'            AS activity_type,
             wa.details              AS details,
+			'Presentation'::TEXT 			     AS title,
             wa.creator_id           AS assigned_to,
             wa.projection_on::date  AS due_on,
             wa.created_on                       AS created_on,
@@ -266,8 +275,9 @@ BEGIN
             activity_id,
             NULL AS message_id,
             activity_type_id,
-            activity_type,
+            activity_type,			
             details,
+			title,
             assigned_to,
             due_on,
             created_on,
@@ -291,8 +301,9 @@ BEGIN
             activity_id,
             NULL AS message_id,
             activity_type_id,
-            activity_type,
+            activity_type,			
             details,
+			title,
             assigned_to,
             due_on,
             created_on,
@@ -318,6 +329,7 @@ BEGIN
             activity_type_id,
             activity_type,
             details,
+			title,
             assigned_to,
             due_on::TIMESTAMP,
             created_on::TIMESTAMP,
@@ -343,6 +355,7 @@ BEGIN
             activity_type_id,
             activity_type,
             details,
+			title,
             assigned_to,
             due_on ::TIMESTAMP,
             created_on ::TIMESTAMP,
@@ -368,6 +381,7 @@ BEGIN
             activity_type_id,
             activity_type,
             details,
+			title,
             assigned_to,
             due_on ::TIMESTAMP,
             created_on ::TIMESTAMP,
@@ -398,11 +412,15 @@ BEGIN
                 ca.activity_type,
                -- ca.details,
                 CASE WHEN ca.activity_type_id = 4 AND is_lead AND NOT coalesce(is_fopc, FALSE) 
-                    THEN concat(ca.marketing_source, ' - ', sch.company_name, ' - ', 'Lead Activity', 
-                                 ' - ', store_names, ' - ', ca.details) 
+                    THEN concat( store_names, ' - ', ca.details) 
                 WHEN ca.activity_type_id = 4 AND is_lead AND coalesce(is_fopc, FALSE) 
-                    THEN concat(sch.company_name, ' - ', 'FOPC Lead Activity', ' - ', store_names, ' - ', ca.details) 
+                    THEN concat( store_names, ' - ', ca.details) 
                 ELSE ca.details END ,
+				CASE WHEN ca.activity_type_id = 4 AND is_lead AND NOT coalesce(is_fopc, FALSE) 
+                    THEN concat(ca.marketing_source, ' - ', sch.company_name, ' - ', 'Lead Activity') 
+                WHEN ca.activity_type_id = 4 AND is_lead AND coalesce(is_fopc, FALSE) 
+                    THEN concat(sch.company_name, ' - ', 'FOPC Lead Activity') 
+                ELSE ca.title END,			
                 ca.assigned_to AS assigned_to_id,
                 u.name         AS assigned_to,
                 ca.due_on::TIMESTAMP,
