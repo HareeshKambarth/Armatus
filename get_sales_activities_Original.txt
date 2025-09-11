@@ -1,0 +1,457 @@
+-- DROP FUNCTION ccc.get_sales_activities(int8, int4, bool);
+
+CREATE OR REPLACE FUNCTION ccc.get_sales_activities(attachedtoid bigint, attachedtotype integer, isrelatedactivities boolean)
+ RETURNS json
+ LANGUAGE plpgsql
+ STABLE SECURITY DEFINER
+AS $function$
+DECLARE
+    results         json;
+    groupid         bigint;
+    attached_to_ids bigint[];
+    v_is_store      boolean;
+
+BEGIN
+    
+    IF isrelatedactivities = TRUE  
+    THEN
+        IF attachedtotype = 40 THEN
+            SELECT ARRAY (SELECT cr.to_id
+            FROM ccc.s360_company_relation cr          
+            WHERE cr.from_id = attachedtoid) INTO attached_to_ids;      
+        ELSEIF  attachedtotype = 2 THEN
+            SELECT ARRAY (SELECT pr.to_id
+            FROM ccc.s360_project_relation pr          
+            WHERE pr.from_id = attachedtoid) INTO attached_to_ids;
+        ELSEIF attachedtotype = 1 THEN
+            SELECT ARRAY (SELECT cr.to_id
+            FROM ccc.s360_contact_relation cr          
+            WHERE cr.from_id = attachedtoid) INTO attached_to_ids;
+        END IF;
+        SELECT array_append(attached_to_ids, attachedtoid) INTO attached_to_ids;
+        SELECT NULL::integer INTO attachedtotype;
+    END IF;
+
+        
+    -- Determine groupid based on whether it's a store or not
+    SELECT 
+        CASE
+            WHEN cc.is_store THEN TRUE 
+            ELSE FALSE 
+        END
+    INTO v_is_store
+    FROM ccc.company cc
+    LEFT JOIN ccc.company_parentage cp USING (company_id)
+    WHERE cc.company_id = attachedtoid;
+
+    -- Uplift Activities
+    WITH cte_uplift_activities AS (
+        SELECT 
+            wa.activity_id,
+            wa.activity_type_id,
+            wa.activity_type,
+            CASE WHEN wa.activity_type_id = 4 AND NOT COALESCE(wa.is_lead, FALSE)
+                THEN concat(wa.title, ' ', wa.details)
+            WHEN wa.activity_type_id = 4 AND COALESCE(wa.is_lead, FALSE)
+                THEN ltrim(substring(details FROM '-(.*)'), ' ')
+            ELSE wa.details END AS details,
+            CASE 
+                WHEN wa.activity_type_id IN (73, 3) THEN wa.creator_id
+                ELSE wa.assigned_to
+            END AS assigned_to,
+            CASE 
+                WHEN wa.activity_type_id IN (3) THEN wa.created_on
+                ELSE wa.event_end_on
+            END AS due_on,
+            wa.created_on,
+            wa.creator_id,
+            wa.is_completed,
+            wa.is_lead,
+            wa.priority,
+            FALSE AS is_fopc,
+            wa.attached_to_id,
+            wa.attached_to_type,
+--            CASE WHEN wa.activity_type_id = 4 
+--                THEN  string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+--                                      || COALESCE(wa.store_list, ''), ',')
+--            ELSE NULL END
+            
+--            string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+--                                      || COALESCE(wa.store_list, ''), ',') AS store_list,
+            string_to_array((SELECT string_agg(DISTINCT trim(x), ',')
+                             FROM regexp_split_to_table(COALESCE(wa.attached_to_id::TEXT, '') || ',' || COALESCE(wa.store_list, ''), ',') AS x), ',') AS store_list,
+            wa.marketing_source,
+            ltrim(reverse(split_part(reverse(wa.details), '-', 1)), ' ') AS store_names
+        FROM ccc.workplan_activity wa
+        WHERE wa.activity_type_id IN (4, 73, 3)
+            --AND (attachedtotype IS NULL OR wa.attached_to_type = attachedtotype)
+            AND ( (NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+                                                                           || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ',')))
+--                    AND  CASE WHEN NOT v_is_store  
+--                                THEN attached_to_type <> 2
+--                            WHEN attachedtotype = 2 THEN wa.attached_to_type = 2 
+--                            WHEN attachedtotype = 1 THEN wa.attached_to_type = 1
+--                            ELSE TRUE END )
+--                  OR (NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+--                                                                           || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ','))
+--                                                                           AND NOT v_is_store AND wa.attached_to_type <> 2)
+                  OR (isrelatedactivities AND wa.attached_to_id = ANY(attached_to_ids)) 
+                )
+            AND NOT (COALESCE(wa.is_deleted, FALSE))
+    )
+    , cte_fopc_activities AS (
+        -- FOPC Activities
+        SELECT 
+            fwa.fopc_activity_id      AS activity_id,
+            fwa.fopc_activity_type_id AS activity_type_id,
+            fwa.fopc_activity_type    AS activity_type,
+            CASE WHEN (fwa.fopc_activity_type_id = 4) AND NOT coalesce(fwa.fopc_is_lead, FALSE)
+                THEN concat(fwa.fopc_title, ' ', fwa.fopc_details)
+            ELSE fwa.fopc_details END AS details,
+            CASE 
+            WHEN fwa.fopc_activity_type_id IN (73, 3) 
+                THEN fwa.fopc_creator_id
+            ELSE fwa.fopc_assigned_to END AS assigned_to,
+            CASE 
+            WHEN fwa.fopc_activity_type_id IN (3) 
+                THEN fwa.fopc_created_on
+            ELSE fwa.fopc_event_end_on END AS due_on,
+            fwa.fopc_created_on            AS created_on,
+            fwa.fopc_creator_id            AS creator_id,
+            fwa.fopc_is_completed          AS is_completed,
+            fwa.fopc_is_lead               AS is_lead,
+            fwa.fopc_priority              AS priority,
+            TRUE                           AS is_fopc,
+            fwa.fopc_attached_to_id,
+            fwa.fopc_attached_to_type,
+           -- CASE WHEN fwa.fopc_activity_type_id = 4
+                --THEN
+               -- string_to_array(COALESCE(fwa.fopc_attached_to_id::TEXT, '') || ',' 
+                                      --|| COALESCE(fwa.fopc_store_list, ''), ',') AS store_list,
+          --  ELSE NULL END    
+          
+            string_to_array((SELECT string_agg(DISTINCT trim(x), ',')
+            FROM regexp_split_to_table(COALESCE(fwa.fopc_attached_to_id::TEXT, '') || ',' || COALESCE(fwa.fopc_store_list, ''), ',') AS x), ',') AS store_list,                                      
+            ltrim(reverse(split_part(reverse(fwa.fopc_details), '-', 1)), ' ') AS store_names
+        FROM ccc.fopc_workplan_activity fwa
+        WHERE fwa.fopc_activity_type_id IN (4, 73, 3)
+            --AND (attachedtotype IS NULL OR fwa.fopc_attached_to_type = attachedtotype)
+            AND ((NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(fwa.fopc_attached_to_id::TEXT, '') || ',' 
+                                          || COALESCE(REPLACE(fwa.fopc_store_list, ' ', ''), ''), ',')))
+                  OR (isrelatedactivities AND fwa.fopc_attached_to_id = ANY(attached_to_ids))
+                )
+            AND NOT (COALESCE(fwa.fopc_is_deleted, FALSE))
+    )
+    , crm_activity_files AS (
+        SELECT DISTINCT ON(cf.file_id)
+            cf.file_id,
+            23                       AS activity_type_id,
+            'File'                   AS activity_type,
+            cf.file_modifiedname     AS details,
+            cf.created_by            AS assigned_to,
+            NULL                     AS due_on,            
+            cf.created_on            AS created_on,
+            cf.created_by            AS creator_id,
+            0                        AS is_completed,
+            FALSE                    AS is_lead,
+            0                        AS priority,
+            COALESCE(is_fopc, FALSE) AS is_fopc,
+            cf.attached_to_id,
+            cf.attached_to_type,
+            --NULL::text[]             
+            (SELECT array_agg(attached_to_id) FROM ccc.crm_files c WHERE file_id = cf.file_id )::text[] AS store_list,
+            (SELECT count(file_id) FROM ccc.crm_files c WHERE file_id = cf.file_id) AS related_cnt
+        FROM ccc.crm_files cf 
+        WHERE (attachedtotype IS NULL OR attached_to_type = attachedtotype)
+            AND ((NOT isrelatedactivities AND attached_to_id = attachedtoid)
+                  OR (isrelatedactivities AND attached_to_id = ANY(attached_to_ids))
+                )
+            AND NOT coalesce(is_deleted, FALSE)
+            --AND is_parent
+        ORDER BY cf.file_id, cf.created_on DESC 
+    )
+    , crm_swat_details AS (
+        SELECT 
+            wa.activity_id,
+            wa.attached_to_id                  AS project_id,
+            wa.activity_type_id                AS activity_type_id,
+            CASE WHEN wa.activity_type_id = 15 
+                THEN 'SWAT-Projects'
+            ELSE 'SWAT' END                    AS activity_type,
+            regexp_replace(wa.details, '^\d{2}\.\d{2}\.\d{2}\s*', '') AS details,
+            COALESCE(u.user_id, wa.creator_id) AS assigned_to,
+--            CASE 
+--            WHEN wa.activity_type_id = 15 
+--                THEN wa.created_on::date
+--            ELSE COALESCE(wa.event_end_on::date, wa.created_on::date) END AS due_on,
+            COALESCE(wa.event_end_on::date, wa.created_on::date) AS due_on,
+            wa.created_on                       AS created_on,
+            wa.creator_id                       AS creator_id,
+            wa.is_completed,
+            wa.is_lead,
+            wa.priority,
+            FALSE AS is_fopc,
+            wa.attached_to_id,
+            wa.attached_to_type,
+            --NULL::text[]  AS store_list
+--            string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+--                                      || COALESCE(wa.store_list, ''), ',') AS store_list
+            string_to_array((SELECT string_agg(DISTINCT trim(x), ',')
+                             FROM regexp_split_to_table(COALESCE(wa.attached_to_id::TEXT, '') || ',' || COALESCE(wa.store_list, ''), ',') AS x), ',') AS store_list
+        FROM ccc.workplan_activity wa
+            LEFT JOIN ccc.user u ON u.name = wa.swat_completed_by
+        WHERE wa.activity_type_id IN (15, 11)
+            --AND (attachedtotype IS NULL OR wa.attached_to_type = 2)
+            AND ((NOT isrelatedactivities AND attachedtoid::text = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+                                          || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ',')))
+                  OR (isrelatedactivities AND attached_to_id = ANY(attached_to_ids))
+                )
+            /* AND ( (NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+                                                                           || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ','))
+                                                                           AND (v_is_store OR attached_to_type = 2))
+                  OR (NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+                                                                           || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ','))
+                                                                           AND NOT v_is_store AND wa.attached_to_type <> 2)
+                  OR (isrelatedactivities AND wa.attached_to_id = ANY(attached_to_ids)) 
+                  
+                  
+                )*/
+            AND NOT (COALESCE(wa.is_deleted, FALSE))
+    )
+    , crm_projection_details AS (
+        SELECT 
+            wa.activity_id,
+            wa.attached_to_id       AS project_id,
+            wa.activity_type_id     AS activity_type_id,
+            'Projection'            AS activity_type,
+            wa.details              AS details,
+            wa.creator_id           AS assigned_to,
+            wa.projection_on::date  AS due_on,
+            wa.created_on                       AS created_on,
+            wa.creator_id                       AS creator_id,
+            wa.is_completed,
+            wa.is_lead,
+            wa.priority,
+            FALSE AS is_fopc,
+            wa.attached_to_id,
+            wa.attached_to_type,
+            --NULL::text[] AS store_list
+--            string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+--                                      || COALESCE(wa.store_list, ''), ',') AS store_list
+            string_to_array((SELECT string_agg(DISTINCT trim(x), ',')
+                             FROM regexp_split_to_table(COALESCE(wa.attached_to_id::TEXT, '') || ',' || COALESCE(wa.store_list, ''), ',') AS x), ',') AS store_list
+        FROM ccc.workplan_activity wa
+        WHERE wa.activity_type_id = 13 
+            AND wa.projection_on IS NOT NULL 
+           -- AND (attachedtotype IS NULL OR wa.attached_to_type = attachedtotype)
+            AND ((NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+                                          || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ',')))
+                  OR (isrelatedactivities AND attached_to_id = ANY(attached_to_ids))
+                )
+            /* AND ( (NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+                                                                           || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ','))
+                                                                           AND (v_is_store OR attached_to_type = 2))
+                  OR (NOT isrelatedactivities AND attachedtoid::TEXT = ANY (string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
+                                                                           || COALESCE(REPLACE(wa.store_list, ' ', ''), ''), ','))
+                                                                           AND NOT v_is_store AND wa.attached_to_type <> 2)
+                  OR (isrelatedactivities AND wa.attached_to_id = ANY(attached_to_ids)) 
+                  
+                  
+                )*/
+            AND NOT (COALESCE(wa.is_deleted, FALSE))
+    )
+    , cte_activities AS (
+        -- Final Aggregation
+        SELECT 
+            activity_id,
+            NULL AS message_id,
+            activity_type_id,
+            activity_type,
+            details,
+            assigned_to,
+            due_on,
+            created_on,
+            creator_id,
+            is_completed,
+            is_lead,
+            priority,
+            is_fopc,
+            NULL AS from_email_address,
+            FALSE::boolean AS has_attachements,
+            NULL AS contact_name,
+            attached_to_id,
+            attached_to_type,
+            store_list,
+            0 AS related_cnt, 
+            marketing_source,
+            store_names
+        FROM cte_uplift_activities
+        UNION ALL
+        SELECT 
+            activity_id,
+            NULL AS message_id,
+            activity_type_id,
+            activity_type,
+            details,
+            assigned_to,
+            due_on,
+            created_on,
+            creator_id,
+            is_completed,
+            is_lead,
+            priority,
+            is_fopc,
+            NULL AS from_email_address,
+            FALSE::boolean AS has_attachements,
+            NULL AS contact_name,
+            fopc_attached_to_id ,
+            fopc_attached_to_type,
+            store_list,
+            0 AS related_cnt,
+            NULL AS marketing_source,
+            store_names
+        FROM cte_fopc_activities
+        UNION ALL
+        SELECT
+            NULL AS activity_id,
+            file_id::text,
+            activity_type_id,
+            activity_type,
+            details,
+            assigned_to,
+            due_on::TIMESTAMP,
+            created_on::TIMESTAMP,
+            creator_id,
+            is_completed,
+            is_lead,
+            priority,
+            is_fopc,
+            NULL  AS from_email_address,
+            FALSE AS has_attachements,
+            NULL  AS contact_name,
+            attached_to_id,
+            attached_to_type,
+            store_list,
+            related_cnt,
+            NULL AS marketing_source,
+            NULL AS store_names
+        FROM crm_activity_files
+        UNION ALL 
+         SELECT 
+            activity_id,
+            project_id::text,
+            activity_type_id,
+            activity_type,
+            details,
+            assigned_to,
+            due_on ::TIMESTAMP,
+            created_on ::TIMESTAMP,
+            creator_id,
+            is_completed,
+            is_lead,
+            priority,
+            is_fopc,
+            NULL AS from_email_address,
+            FALSE::boolean AS has_attachements,
+            NULL AS contact_name,
+            attached_to_id,
+            attached_to_type,
+            store_list,
+            0 AS related_cnt ,
+            NULL AS marketing_source,
+            NULL AS store_names
+        FROM crm_swat_details
+        UNION ALL 
+        SELECT 
+            activity_id,
+            attached_to_id::text,
+            activity_type_id,
+            activity_type,
+            details,
+            assigned_to,
+            due_on ::TIMESTAMP,
+            created_on ::TIMESTAMP,
+            creator_id,
+            is_completed,
+            is_lead,
+            priority,
+            is_fopc,
+            NULL AS from_email_address,
+            FALSE::boolean AS has_attachements,
+            NULL AS contact_name,
+            attached_to_id,
+            attached_to_type,
+            store_list,
+            NULL::numeric AS related_cnt,
+            NULL AS marketing_source,
+            NULL AS store_names
+        FROM crm_projection_details
+    )
+    -- Final Result as JSON
+    SELECT json_agg(row_to_json(swats)) 
+    INTO results
+    FROM (
+            SELECT  
+                ca.activity_id,
+                ca.message_id,
+                ca.activity_type_id,
+                ca.activity_type,
+               -- ca.details,
+                CASE WHEN ca.activity_type_id = 4 AND is_lead AND NOT coalesce(is_fopc, FALSE) 
+                    THEN concat(ca.marketing_source, ' - ', sch.company_name, ' - ', 'Lead Activity', 
+                                 ' - ', store_names, ' - ', ca.details) 
+                WHEN ca.activity_type_id = 4 AND is_lead AND coalesce(is_fopc, FALSE) 
+                    THEN concat(sch.company_name, ' - ', 'FOPC Lead Activity', ' - ', store_names, ' - ', ca.details) 
+                ELSE ca.details END ,
+                ca.assigned_to AS assigned_to_id,
+                u.name         AS assigned_to,
+                ca.due_on::TIMESTAMP,
+                ca.created_on::TIMESTAMP,
+                u1.name        AS created_by,
+                ca.is_completed AS is_completed,
+                ca.is_lead,
+                ca.priority,
+                ca.is_fopc,
+                ca.from_email_address,
+                ca.has_attachements,
+                ca.contact_name,
+                coalesce(sch.company_name, sc.contact_name, sph.project_name) AS group_name,
+                coalesce(sch.company_id, sc.contact_id, sph.project_id)       AS group_id,
+                ca.attached_to_id                                                AS company_id,
+                ca.store_list,
+                ca.attached_to_type,
+                CASE 
+                    WHEN NOT isrelatedactivities THEN FALSE
+--                    WHEN  isrelatedactivities AND NOT v_is_store AND attached_to_type IN (1, 2)
+--                        THEN TRUE
+                    ELSE 
+                        NOT EXISTS (
+                            SELECT 1
+                            FROM unnest(ARRAY[ca.attached_to_id::text] || ca.store_list) AS val
+                            WHERE val = attachedtoid::text)
+                END AS is_related,
+                COALESCE(ca.related_cnt, 0) AS related_count 
+            FROM cte_activities ca
+                LEFT JOIN ccc.user u 
+                    ON u.user_id = ca.assigned_to
+                LEFT JOIN ccc.user u1 
+                    ON u1.user_id = ca.creator_id
+                LEFT JOIN ccc.s360_company_header sch 
+                    ON sch.company_id = ca.attached_to_id  
+                    AND ca.attached_to_type = 40
+                LEFT JOIN ccc.s360_contact_header sc
+                    ON sc.contact_id = ca.attached_to_id 
+                    AND ca.attached_to_type = 1
+                LEFT JOIN ccc.s360_project_header sph 
+                    ON sph.project_id = ca.attached_to_id
+                    AND ca.attached_to_type = 2
+--                LEFT JOIN ccc.s360_nextactions_header snh 
+--                    ON snh.activity_id = ca.activity_id
+--                    AND ca.activity_id IS NOT NULL 
+            ORDER BY due_on DESC
+    ) swats;
+
+    RETURN results;
+END;
+$function$
+;
