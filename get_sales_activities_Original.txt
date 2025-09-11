@@ -433,7 +433,7 @@ BEGIN
                 ca.from_email_address,
                 ca.has_attachements,
                 ca.contact_name,
-                coalesce(sch.company_name, sc.contact_name, sph.project_name) AS group_name,
+--                coalesce(sch.company_name, sc.contact_name, sph.project_name) AS group_name,
                 coalesce(sch.company_id, sc.contact_id, sph.project_id)       AS group_id,
                 ca.attached_to_id                                                AS company_id,
                 ca.store_list,
@@ -448,7 +448,12 @@ BEGIN
                             FROM unnest(ARRAY[ca.attached_to_id::text] || ca.store_list) AS val
                             WHERE val = attachedtoid::text)
                 END AS is_related,
-                COALESCE(ca.related_cnt, 0) AS related_count 
+                COALESCE(ca.related_cnt, 0) AS related_count,
+				(
+				  SELECT string_agg(c.company_name, ', ')
+				  FROM ccc.company c
+				  WHERE c.company_id::TEXT = ANY(ca.store_list)
+				) AS group_name 
             FROM cte_activities ca
                 LEFT JOIN ccc.user u 
                     ON u.user_id = ca.assigned_to
