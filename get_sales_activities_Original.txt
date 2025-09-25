@@ -18,7 +18,7 @@ BEGIN
         IF attachedtotype = 40 THEN
             SELECT ARRAY (SELECT cr.to_id
             FROM ccc.s360_company_relation cr          
-            WHERE cr.from_id = attachedtoid) INTO attached_to_ids;      
+            WHERE cr.from_id = attachedtoid) INTO attached_to_ids; 			     
         ELSEIF  attachedtotype = 2 THEN
             SELECT ARRAY (SELECT pr.to_id
             FROM ccc.s360_project_relation pr          
@@ -50,13 +50,18 @@ BEGIN
             wa.activity_id,
             wa.activity_type_id,
             wa.activity_type,            
-			CASE 					
-	            WHEN wa.activity_type_id = 4 AND COALESCE(wa.is_lead, FALSE)
-	                THEN ltrim(substring(details FROM '-(.*)'), ' ')
-	            ELSE wa.details END AS details,
-			CASE 
+--			CASE 					
+--	            WHEN wa.activity_type_id = 4 AND COALESCE(wa.is_lead, FALSE)
+--	                THEN ltrim(substring(details FROM '-(.*)'), ' ')
+--	            ELSE wa.details END AS details,
+			wa.details  AS details,
+			CASE
+				WHEN wa.activity_type_id =73 
+					THEN  NULL
 				WHEN wa.activity_type_id = 4 AND NOT COALESCE(wa.is_lead, FALSE)
                 	THEN wa.title
+				WHEN wa.activity_type_id = 4 AND COALESCE(wa.is_lead, FALSE)
+					THEN CONCAT(ltrim(substring(wa.title FROM '-(.*)'), ' '),' - ',ltrim(substring(wa.details FROM '.*-(.*)'), ' ')) --To add ALL STORE to lead 
 				ELSE ' ' END AS title,
             CASE 
                 WHEN wa.activity_type_id IN (73, 3) THEN wa.creator_id
@@ -109,11 +114,16 @@ BEGIN
             fwa.fopc_activity_type_id AS activity_type_id,
             fwa.fopc_activity_type    AS activity_type,
 			fwa.fopc_details AS details,
-            CASE 
-				WHEN (fwa.fopc_activity_type_id = 4) AND NOT coalesce(fwa.fopc_is_lead, FALSE)
-                	THEN fwa.fopc_title
-					ELSE ' ' 
-				END AS title,            
+--            CASE 
+--				WHEN (fwa.fopc_activity_type_id = 4) AND NOT coalesce(fwa.fopc_is_lead, FALSE)
+--                	THEN fwa.fopc_title
+--				WHEN (fwa.fopc_activity_type_id = 4) AND COALESCE(fwa.fopc_is_lead, FALSE)
+--					THEN fwa.fopc_title--CONCAT(fwa.fopc_title,' ',ltrim(substring(fwa.fopc_details FROM '.*-(.*)'), ' '))--To add ALL STORE to lead 
+--					ELSE ' ' 
+--				END AS title,
+			CASE WHEN fwa.fopc_activity_type_id =73 
+					THEN  NULL
+			ELSE COALESCE(fwa.fopc_title,'') END AS title,            
             CASE 
             WHEN fwa.fopc_activity_type_id IN (73, 3) 
                 THEN fwa.fopc_creator_id
@@ -150,11 +160,12 @@ BEGIN
     )
     , crm_activity_files AS (
         SELECT DISTINCT ON(cf.file_id)
+			cf.id,
             cf.file_id,
             23                       AS activity_type_id,
             'File'                   AS activity_type,
             cf.file_modifiedname     AS details,
-			NULL::TEXT 			     AS title,	
+			''::TEXT 			     AS title,	
             cf.created_by            AS assigned_to,
             NULL                     AS due_on,            
             cf.created_on            AS created_on,
@@ -166,7 +177,7 @@ BEGIN
             cf.attached_to_id,
             cf.attached_to_type,
             --NULL::text[]             
-            (SELECT array_agg(attached_to_id) FROM ccc.crm_files c WHERE file_id = cf.file_id )::text[] AS store_list,
+            (SELECT array_agg(attached_to_id) FROM ccc.crm_files c WHERE file_id = cf.file_id AND NOT COALESCE(c.is_deleted,FALSE))::text[] AS store_list,
             (SELECT count(file_id) FROM ccc.crm_files c WHERE file_id = cf.file_id) AS related_cnt
         FROM ccc.crm_files cf 
         WHERE (attachedtotype IS NULL OR attached_to_type = attachedtotype)
@@ -192,7 +203,7 @@ BEGIN
 --            WHEN wa.activity_type_id = 15 
 --                THEN wa.created_on::date
 --            ELSE COALESCE(wa.event_end_on::date, wa.created_on::date) END AS due_on,
-            COALESCE(wa.event_end_on::date, wa.created_on::date) AS due_on,
+            COALESCE(wa.event_end_on::TIMESTAMP, wa.created_on::TIMESTAMP) AS due_on,
             wa.created_on                       AS created_on,
             wa.creator_id                       AS creator_id,
             wa.is_completed,
@@ -205,7 +216,8 @@ BEGIN
 --            string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
 --                                      || COALESCE(wa.store_list, ''), ',') AS store_list
             string_to_array((SELECT string_agg(DISTINCT trim(x), ',')
-                             FROM regexp_split_to_table(COALESCE(wa.attached_to_id::TEXT, '') || ',' || COALESCE(wa.store_list, ''), ',') AS x), ',') AS store_list
+                             FROM regexp_split_to_table(COALESCE(wa.attached_to_id::TEXT, '') || ',' || COALESCE(wa.store_list, ''), ',') AS x), ',') AS store_list,
+			ltrim(reverse(split_part(reverse(wa.details), '-', 1)), ' ') AS store_names
         FROM ccc.workplan_activity wa
             LEFT JOIN ccc.user u ON u.name = wa.swat_completed_by
         WHERE wa.activity_type_id IN (15, 11)
@@ -235,7 +247,7 @@ BEGIN
             wa.details              AS details,
 			'Presentation'::TEXT 			     AS title,
             wa.creator_id           AS assigned_to,
-            wa.projection_on::date  AS due_on,
+            wa.projection_on::TIMESTAMP  AS due_on,
             wa.created_on                       AS created_on,
             wa.creator_id                       AS creator_id,
             wa.is_completed,
@@ -248,7 +260,8 @@ BEGIN
 --            string_to_array(COALESCE(wa.attached_to_id::TEXT, '') || ',' 
 --                                      || COALESCE(wa.store_list, ''), ',') AS store_list
             string_to_array((SELECT string_agg(DISTINCT trim(x), ',')
-                             FROM regexp_split_to_table(COALESCE(wa.attached_to_id::TEXT, '') || ',' || COALESCE(wa.store_list, ''), ',') AS x), ',') AS store_list
+                             FROM regexp_split_to_table(COALESCE(wa.attached_to_id::TEXT, '') || ',' || COALESCE(wa.store_list, ''), ',') AS x), ',') AS store_list,
+			ltrim(reverse(split_part(reverse(wa.details), '-', 1)), ' ') AS store_names
         FROM ccc.workplan_activity wa
         WHERE wa.activity_type_id = 13 
             AND wa.projection_on IS NOT NULL 
@@ -324,7 +337,7 @@ BEGIN
         FROM cte_fopc_activities
         UNION ALL
         SELECT
-            NULL AS activity_id,
+            id AS activity_id,
             file_id::text,
             activity_type_id,
             activity_type,
@@ -372,7 +385,7 @@ BEGIN
             store_list,
             0 AS related_cnt ,
             NULL AS marketing_source,
-            NULL AS store_names
+            store_names
         FROM crm_swat_details
         UNION ALL 
         SELECT 
@@ -398,9 +411,21 @@ BEGIN
             store_list,
             NULL::numeric AS related_cnt,
             NULL AS marketing_source,
-            NULL AS store_names
+            store_names
         FROM crm_projection_details
-    )
+    ),cte_store_list AS (
+	    SELECT 
+	        ca.activity_id,
+	        string_agg(c.company_name, ', ') AS store_names_list
+	    FROM cte_activities ca
+	    LEFT JOIN LATERAL (
+	        SELECT trim(id) AS id
+	        FROM unnest(ca.store_list) AS id
+	        WHERE trim(id) <> ''
+	    ) AS ids(id) ON TRUE
+	    LEFT JOIN ccc.company c ON c.company_id = ids.id::bigint	
+	    GROUP BY ca.activity_id
+	)
     -- Final Result as JSON
     SELECT json_agg(row_to_json(swats)) 
     INTO results
@@ -411,16 +436,17 @@ BEGIN
                 ca.activity_type_id,
                 ca.activity_type,
                -- ca.details,
-                CASE WHEN ca.activity_type_id = 4 AND is_lead AND NOT coalesce(is_fopc, FALSE) 
-                    THEN concat( store_names, ' - ', ca.details) 
+--                CASE WHEN ca.activity_type_id = 4 AND is_lead AND NOT coalesce(is_fopc, FALSE) 
+--                    THEN ca.details--concat( store_names, ' - ', ca.details) 
+--                WHEN ca.activity_type_id = 4 AND is_lead AND coalesce(is_fopc, FALSE) 
+--                    THEN concat( store_names, ' - ', ca.details) 
+--                ELSE ca.details END AS details ,
+				ca.details  AS details ,	
+				coalesce(CASE WHEN ca.activity_type_id = 4 AND is_lead AND NOT coalesce(is_fopc, FALSE) 
+                    THEN concat(ca.marketing_source, ' - ', sch.company_name, ' - ', ca.title) 
                 WHEN ca.activity_type_id = 4 AND is_lead AND coalesce(is_fopc, FALSE) 
-                    THEN concat( store_names, ' - ', ca.details) 
-                ELSE ca.details END ,
-				CASE WHEN ca.activity_type_id = 4 AND is_lead AND NOT coalesce(is_fopc, FALSE) 
-                    THEN concat(ca.marketing_source, ' - ', sch.company_name, ' - ', 'Lead Activity') 
-                WHEN ca.activity_type_id = 4 AND is_lead AND coalesce(is_fopc, FALSE) 
-                    THEN concat(sch.company_name, ' - ', 'FOPC Lead Activity') 
-                ELSE ca.title END,			
+                    THEN concat(sch.company_name, ' - ', ca.title,' - ',store_names) 
+                ELSE ca.title END,' ') AS title,						
                 ca.assigned_to AS assigned_to_id,
                 u.name         AS assigned_to,
                 ca.due_on::TIMESTAMP,
@@ -433,7 +459,7 @@ BEGIN
                 ca.from_email_address,
                 ca.has_attachements,
                 ca.contact_name,
---                coalesce(sch.company_name, sc.contact_name, sph.project_name) AS group_name,
+                coalesce(sch.company_name, sc.contact_name, sph.project_name) AS group_name,
                 coalesce(sch.company_id, sc.contact_id, sph.project_id)       AS group_id,
                 ca.attached_to_id                                                AS company_id,
                 ca.store_list,
@@ -449,11 +475,13 @@ BEGIN
                             WHERE val = attachedtoid::text)
                 END AS is_related,
                 COALESCE(ca.related_cnt, 0) AS related_count,
-				(
-				  SELECT string_agg(c.company_name, ', ')
-				  FROM ccc.company c
-				  WHERE c.company_id::TEXT = ANY(ca.store_list)
-				) AS group_name 
+				store_names,
+--				(
+--				  SELECT string_agg(c.company_name, ', ')
+--				  FROM ccc.company c
+--				  WHERE c.company_id::TEXT = ANY(ca.store_list)
+--				) AS group_name
+				cl.store_names_list  
             FROM cte_activities ca
                 LEFT JOIN ccc.user u 
                     ON u.user_id = ca.assigned_to
@@ -468,6 +496,8 @@ BEGIN
                 LEFT JOIN ccc.s360_project_header sph 
                     ON sph.project_id = ca.attached_to_id
                     AND ca.attached_to_type = 2
+				LEFT JOIN cte_store_list cl
+					ON ca.activity_id=cl.activity_id
 --                LEFT JOIN ccc.s360_nextactions_header snh 
 --                    ON snh.activity_id = ca.activity_id
 --                    AND ca.activity_id IS NOT NULL 
@@ -478,3 +508,4 @@ BEGIN
 END;
 $function$
 ;
+
